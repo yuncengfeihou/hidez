@@ -1,324 +1,307 @@
-import { extension_settings, getContext } from "../../../extensions.js";
+import { extension_settings, loadExtensionSettings, getContext } from "../../../extensions.js";
 import { saveSettingsDebounced, eventSource, event_types } from "../../../../script.js";
-import { hideChatMessageRange } from "../../../chats.js";
+import { MessageIndexManager } from "./messageIndex.js";
 
 const extensionName = "hide-helper";
 const defaultSettings = {
-    performanceMode: true,  // 默认启用高性能模式
-    bitmapThreshold: 500    // 消息量超过500时启用位图优化
+    hideLastN: 0,
+    lastAppliedSettings: null,
+    autoApplyOnLoad: false,
+    useIndexing: true, // 新增: 是否使用索引系统
+    batchSize: 50 // 新增: 批处理大小设置
 };
 
-// 高性能操作核心
-class HideHelperCore {
-    constructor() {
-        this.hiddenBitmap = null;
-        this.domUpdateQueue = [];
-        this.workerPool = [];
-        this.maxWorkers = navigator.hardwareConcurrency || 4;
-    }
+// 消息索引管理器实例
+const messageIndexManager = new MessageIndexManager();
 
-    init(chatLength) {
-        if (chatLength > extension_settings[extensionName]?.bitmapThreshold) {
-            this.hiddenBitmap = new Uint8Array(chatLength);
-            this.buildBitmap();
-        }
-    }
-
-    buildBitmap() {
-        const { chat } = getContext();
-        for (let i = 0; i < chat.length; i++) {
-            this.hiddenBitmap[i] = chat[i].is_system ? 1 : 0;
-        }
-    }
-
-    async optimizedHide(hideAfterIndex) {
-        const { chat } = getContext();
-        const total = chat.length;
-        if (total === 0) return;
-
-        const startTime = performance.now();
-        
-        if (total > 2000 && extension_settings[extensionName]?.performanceMode) {
-            await this.parallelHide(hideAfterIndex);
-        } else {
-            this.jumpScanHide(hideAfterIndex);
-        }
-
-        this.flushDomUpdates();
-        console.debug(`HideHelper processed ${total} messages in ${performance.now() - startTime}ms`);
-    }
-
-    jumpScanHide(hideAfterIndex) {
-        const { chat } = getContext();
-        let skipCounter = 0;
-        const skipThreshold = Math.max(10, Math.floor(chat.length * 0.01)); // 动态跳跃阈值
-
-        // Phase 1: 向前隐藏旧消息
-        for (let i = hideAfterIndex; i >= 0; ) {
-            if (this.checkHidden(i)) {
-                skipCounter++;
-                i -= skipCounter > 3 ? skipThreshold : 1; // 连续跳过时增大步长
-                continue;
-            }
-            
-            this.setHidden(i, true);
-            skipCounter = 0;
-            i--;
-        }
-
-        // Phase 2: 向后显示新消息
-        for (let i = hideAfterIndex + 1; i < chat.length; ) {
-            if (!this.checkHidden(i)) {
-                skipCounter++;
-                i += skipCounter > 3 ? skipThreshold : 1;
-                continue;
-            }
-            
-            this.setHidden(i, false);
-            skipCounter = 0;
-            i++;
-        }
-    }
-
-    async parallelHide(hideAfterIndex) {
-        const { chat } = getContext();
-        const segmentSize = Math.ceil(chat.length / this.maxWorkers);
-        const promises = [];
-
-        for (let i = 0; i < this.maxWorkers; i++) {
-            const start = i * segmentSize;
-            const end = Math.min(start + segmentSize - 1, chat.length - 1);
-            
-            promises.push(
-                this.workerExec({
-                    chat: chat.slice(start, end + 1),
-                    hideAfterIndex,
-                    startIdx: start,
-                    isForward: i < this.maxWorkers / 2 // 前半段向前处理
-                })
-            );
-        }
-
-        const results = await Promise.all(promises);
-        results.forEach(({ changes }) => {
-            changes.forEach(({ index, hide }) => this.setHidden(index, hide, false));
-        });
-    }
-
-    workerExec(task) {
-        return new Promise(resolve => {
-            const worker = this.getWorker();
-            worker.onmessage = e => {
-                this.releaseWorker(worker);
-                resolve(e.data);
-            };
-            worker.postMessage(task);
-        });
-    }
-
-    getWorker() {
-        if (this.workerPool.length > 0) {
-            return this.workerPool.pop();
-        }
-        
-        const workerCode = `
-            self.onmessage = function(e) {
-                const { chat, hideAfterIndex, startIdx, isForward } = e.data;
-                const changes = [];
-                
-                if (isForward) {
-                    for (let i = hideAfterIndex; i >= 0; i--) {
-                        if (chat[i - startIdx]?.is_system) continue;
-                        changes.push({ index: startIdx + i, hide: true });
-                    }
-                } else {
-                    for (let i = hideAfterIndex + 1; i < chat.length; i++) {
-                        if (!chat[i - startIdx]?.is_system) continue;
-                        changes.push({ index: startIdx + i, hide: false });
-                    }
-                }
-                
-                self.postMessage({ changes });
-            };
-        `;
-        
-        const blob = new Blob([workerCode], { type: 'application/javascript' });
-        return new Worker(URL.createObjectURL(blob));
-    }
-
-    releaseWorker(worker) {
-        if (this.workerPool.length < this.maxWorkers) {
-            this.workerPool.push(worker);
-        } else {
-            worker.terminate();
-        }
-    }
-
-    checkHidden(index) {
-        return this.hiddenBitmap 
-            ? this.hiddenBitmap[index] === 1
-            : getContext().chat[index].is_system;
-    }
-
-    setHidden(index, hide, enqueue = true) {
-        const { chat } = getContext();
-        chat[index].is_system = hide;
-        if (this.hiddenBitmap) this.hiddenBitmap[index] = hide ? 1 : 0;
-        
-        if (enqueue) {
-            this.domUpdateQueue.push({ index, hide });
-            if (this.domUpdateQueue.length > 50) this.flushDomUpdates();
-        }
-    }
-
-    flushDomUpdates() {
-        if (this.domUpdateQueue.length === 0) return;
-
-        const fragment = document.createDocumentFragment();
-        const processed = new Set();
-        
-        // 去重处理
-        this.domUpdateQueue.forEach(({ index, hide }) => {
-            if (processed.has(index)) return;
-            processed.add(index);
-            
-            const element = document.querySelector(`.mes[mesid="${index}"]`);
-            if (element) {
-                element.style.display = hide ? 'none' : '';
-                fragment.appendChild(element.cloneNode(true));
-            }
-        });
-
-        requestAnimationFrame(() => {
-            $('#chat').append(fragment);
-            this.domUpdateQueue = [];
-        });
-    }
-}
-
-// UI和状态管理
-class HideHelperUI {
-    constructor(core) {
-        this.core = core;
-        this.currentSettings = null;
-    }
-
-    init() {
-        this.createUI();
-        this.setupEventListeners();
-        loadSettings();
-    }
-
-    createUI() {
-        const panel = document.createElement('div');
-        panel.id = 'hide-helper-panel';
-        panel.innerHTML = `
-            <h4>隐藏助手 <span class="perf-badge">高性能模式</span></h4>
-            <div class="hide-helper-section">
-                <label for="hide-last-n">保留最近消息数:</label>
-                <input type="number" id="hide-last-n" min="0" 
-                       placeholder="输入要保留的消息数量">
-                <div class="hide-helper-buttons">
-                    <button id="hide-save-btn">保存设置</button>
-                </div>
-            </div>
-            <div class="hide-stats">
-                <span>消息总数: <span id="total-messages">0</span></span>
-                <span>隐藏消息: <span id="hidden-count">0</span></span>
-            </div>
-            <div class="advanced-options">
-                <label>
-                    <input type="checkbox" id="perf-mode" checked>
-                    启用高性能模式
-                </label>
-            </div>
-        `;
-        document.getElementById('extensions_settings').appendChild(panel);
-    }
-
-    setupEventListeners() {
-        $('#hide-save-btn').on('click', () => this.saveSettings());
-        $('#perf-mode').on('change', (e) => {
-            extension_settings[extensionName].performanceMode = e.target.checked;
-            saveSettingsDebounced();
-        });
-
-        eventSource.on(event_types.CHAT_CHANGED, () => this.loadChatState());
-        eventSource.on(event_types.MESSAGE_RECEIVED, () => {
-            if (this.currentSettings?.hideLastN > 0) {
-                this.applySettings();
-            }
-        });
-    }
-
-    async applySettings() {
-        const hideLastN = parseInt($('#hide-last-n').val()) || 0;
-        const { chat } = getContext();
-        
-        if (hideLastN <= 0 || hideLastN >= chat.length) {
-            await hideChatMessageRange(0, chat.length - 1, true);
-            this.updateStats();
-            return;
-        }
-
-        this.core.init(chat.length);
-        const visibleStart = chat.length - hideLastN;
-        await this.core.optimizedHide(visibleStart - 1);
-        this.updateStats();
-    }
-
-    updateStats() {
-        const { chat } = getContext();
-        const hiddenCount = chat.filter(m => m.is_system).length;
-        $('#total-messages').text(chat.length);
-        $('#hidden-count').text(hiddenCount);
-    }
-
-    loadChatState() {
-        const context = getContext();
-        const target = context.groupId 
-            ? context.groups.find(x => x.id == context.groupId)
-            : context.characters[context.characterId];
-        
-        this.currentSettings = target?.data?.hideHelperSettings || { hideLastN: 0 };
-        $('#hide-last-n').val(this.currentSettings.hideLastN);
-        this.updateStats();
-    }
-
-    async saveSettings() {
-        const context = getContext();
-        const hideLastN = parseInt($('#hide-last-n').val()) || 0;
-        const target = context.groupId 
-            ? context.groups.find(x => x.id == context.groupId)
-            : context.characters[context.characterId];
-        
-        if (!target) return;
-
-        target.data = target.data || {};
-        target.data.hideHelperSettings = { hideLastN };
-        this.currentSettings = { hideLastN };
-        
-        // 先保存设置
-        saveSettingsDebounced();
-        
-        // 然后应用设置
-        await this.applySettings();
-        
-        toastr.success('设置已保存并应用');
-    }
-}
-
-// 初始化
-let coreInstance;
-let uiInstance;
-
-jQuery(async () => {
-    function loadSettings() {
-        extension_settings[extensionName] = extension_settings[extensionName] || {};
+// 初始化扩展设置
+function loadSettings() {
+    extension_settings[extensionName] = extension_settings[extensionName] || {};
+    if (Object.keys(extension_settings[extensionName]).length === 0) {
         Object.assign(extension_settings[extensionName], defaultSettings);
     }
+}
 
-    coreInstance = new HideHelperCore();
-    uiInstance = new HideHelperUI(coreInstance);
-    uiInstance.init();
+// 优化的消息隐藏函数
+async function hideChatMessageRange(start, end = start, unhide = false) {
+    const context = getContext();
+    const chat = context.chat;
+    
+    if (!chat?.length || typeof start !== 'number') return;
+    
+    // 规范化范围
+    start = Math.max(0, Math.min(start, chat.length - 1));
+    end = Math.max(0, Math.min(end, chat.length - 1));
+    [start, end] = [Math.min(start, end), Math.max(start, end)];
+
+    const settings = extension_settings[extensionName];
+    
+    if (settings.useIndexing) {
+        // 使用索引系统处理
+        const result = await messageIndexManager.processRange(chat, start, end, unhide);
+        await updateDOMWithResult(result);
+    } else {
+        // 传统批处理方式
+        await processBatchedMessages(chat, start, end, unhide);
+    }
+}
+
+// 使用DocumentFragment批量更新DOM
+async function updateDOMWithResult(result) {
+    if (!result.updates.size) return;
+
+    await new Promise(resolve => {
+        requestAnimationFrame(() => {
+            const fragment = document.createDocumentFragment();
+            const chat = getContext().chat;
+            
+            for (const [messageId, update] of result.updates) {
+                const messageBlock = $(`.mes[mesid="${messageId}"]`);
+                if (messageBlock.length) {
+                    messageBlock.attr('is_system', String(update.isHidden));
+                    chat[update.position].is_system = update.isHidden;
+                    fragment.appendChild(messageBlock[0].cloneNode(true));
+                }
+            }
+            
+            const chatContainer = document.getElementById('chat');
+            if (chatContainer) {
+                chatContainer.innerHTML = '';
+                chatContainer.appendChild(fragment);
+            }
+            
+            resolve();
+        });
+    });
+}
+
+// 传统批处理方式处理消息
+async function processBatchedMessages(chat, start, end, unhide) {
+    const batchSize = extension_settings[extensionName].batchSize;
+    const updates = new Map();
+
+    for (let i = start; i <= end; i += batchSize) {
+        const chunkEnd = Math.min(i + batchSize - 1, end);
+        
+        // 收集批次更新
+        for (let j = i; j <= chunkEnd; j++) {
+            if (chat[j].is_system !== unhide) {
+                chat[j].is_system = unhide;
+                updates.set(j, unhide);
+            }
+        }
+
+        // 批量更新DOM
+        if (updates.size > 0) {
+            await new Promise(resolve => {
+                requestAnimationFrame(() => {
+                    for (const [messageId, isHidden] of updates) {
+                        const messageBlock = $(`.mes[mesid="${messageId}"]`);
+                        if (messageBlock.length) {
+                            messageBlock.attr('is_system', String(isHidden));
+                        }
+                    }
+                    updates.clear();
+                    resolve();
+                });
+            });
+        }
+    }
+}
+
+// 应用隐藏设置
+async function applyHideSettings() {
+    const context = getContext();
+    const chatLength = context.chat?.length || 0;
+    
+    if (chatLength === 0) {
+        toastr.warning('没有可用的聊天消息');
+        return;
+    }
+    
+    const hideLastN = extension_settings[extensionName].hideLastN || 0;
+    
+    if (hideLastN > 0 && hideLastN < chatLength) {
+        const visibleStart = chatLength - hideLastN;
+        
+        try {
+            showLoader();
+            // 先取消隐藏所有消息
+            await hideChatMessageRange(0, chatLength - 1, true);
+            // 然后隐藏指定范围
+            await hideChatMessageRange(0, visibleStart - 1, false);
+            
+            extension_settings[extensionName].lastAppliedSettings = {
+                type: 'lastN',
+                value: hideLastN,
+                timestamp: Date.now()
+            };
+            
+            saveSettingsDebounced();
+            toastr.success('隐藏设置已应用');
+        } catch (error) {
+            console.error('应用隐藏设置时出错:', error);
+            toastr.error('应用设置时出错');
+        } finally {
+            hideLoader();
+        }
+    } else if (hideLastN === 0) {
+        // 显示所有消息
+        await hideChatMessageRange(0, chatLength - 1, true);
+        extension_settings[extensionName].lastAppliedSettings = null;
+        saveSettingsDebounced();
+        toastr.success('所有消息已显示');
+    }
+}
+
+// 创建设置UI
+function createSettingsUI() {
+    const settingsHtml = `
+        <div id="hide-helper-settings" class="hide-helper-settings">
+            <div class="inline-drawer">
+                <div class="inline-drawer-toggle inline-drawer-header">
+                    <b>隐藏消息助手</b>
+                    <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+                </div>
+                <div class="inline-drawer-content">
+                    <div class="hide-helper-controls">
+                        <label for="hide-last-n">隐藏最后N条之前的消息:</label>
+                        <input type="number" id="hide-last-n" min="0" class="text_pole" 
+                            value="${extension_settings[extensionName].hideLastN}">
+                        
+                        <label class="checkbox_label">
+                            <input type="checkbox" id="auto-apply-setting" 
+                                ${extension_settings[extensionName].autoApplyOnLoad ? 'checked' : ''}>
+                            自动应用上次设置
+                        </label>
+                        
+                        <label class="checkbox_label">
+                            <input type="checkbox" id="use-indexing" 
+                                ${extension_settings[extensionName].useIndexing ? 'checked' : ''}>
+                            使用索引系统(推荐)
+                        </label>
+                        
+                        <div class="hide-helper-buttons">
+                            <button id="apply-hide-settings" class="menu_button">应用设置</button>
+                            <button id="reset-hide-settings" class="menu_button">重置</button>
+                        </div>
+                    </div>
+                    <hr class="sysHR">
+                    <p class="hint">
+                        提示: 使用索引系统可以提高大量消息处理的性能。
+                        当前状态: <span id="indexing-status">初始化中...</span>
+                    </p>
+                </div>
+            </div>
+        </div>
+    `;
+
+    $('#extensions_settings').append(settingsHtml);
+    setupEventListeners();
+    updateIndexingStatus();
+}
+
+// 设置事件监听器
+function setupEventListeners() {
+    // 输入框变更事件
+    $('#hide-last-n').on('input', (e) => {
+        const value = parseInt(e.target.value) || 0;
+        extension_settings[extensionName].hideLastN = value;
+        saveSettingsDebounced();
+    });
+
+    // 自动应用设置复选框
+    $('#auto-apply-setting').on('change', (e) => {
+        extension_settings[extensionName].autoApplyOnLoad = e.target.checked;
+        saveSettingsDebounced();
+    });
+
+    // 使用索引系统复选框
+    $('#use-indexing').on('change', (e) => {
+        extension_settings[extensionName].useIndexing = e.target.checked;
+        saveSettingsDebounced();
+        updateIndexingStatus();
+    });
+
+    // 应用按钮
+    $('#apply-hide-settings').on('click', applyHideSettings);
+
+    // 重置按钮
+    $('#reset-hide-settings').on('click', async () => {
+        const context = getContext();
+        if (context.chat?.length) {
+            await hideChatMessageRange(0, context.chat.length - 1, true);
+            extension_settings[extensionName].lastAppliedSettings = null;
+            saveSettingsDebounced();
+            toastr.success('设置已重置');
+        }
+    });
+
+    // 监听新消息事件
+    eventSource.on(event_types.MESSAGE_RECEIVED, async () => {
+        if (extension_settings[extensionName].autoApplyOnLoad && 
+            extension_settings[extensionName].lastAppliedSettings) {
+            await applyLastSettings();
+        }
+    });
+
+    // 监听聊天改变事件
+    eventSource.on(event_types.CHAT_CHANGED, async () => {
+        if (extension_settings[extensionName].autoApplyOnLoad && 
+            extension_settings[extensionName].lastAppliedSettings) {
+            await applyLastSettings();
+        }
+    });
+}
+
+// 更新索引状态显示
+function updateIndexingStatus() {
+    const statusElement = $('#indexing-status');
+    if (extension_settings[extensionName].useIndexing) {
+        statusElement.text('已启用 (性能优化模式)');
+        statusElement.css('color', 'green');
+    } else {
+        statusElement.text('未启用 (传统模式)');
+        statusElement.css('color', 'orange');
+    }
+}
+
+// 应用上次保存的设置
+async function applyLastSettings() {
+    const lastSettings = extension_settings[extensionName].lastAppliedSettings;
+    if (!lastSettings) return;
+
+    const context = getContext();
+    if (!context.chat?.length) return;
+
+    if (lastSettings.type === 'lastN') {
+        extension_settings[extensionName].hideLastN = lastSettings.value;
+        await applyHideSettings();
+    }
+}
+
+// 初始化扩展
+jQuery(async () => {
+    try {
+        loadSettings();
+        createSettingsUI();
+        
+        // 如果启用了自动应用，应用上次的设置
+        if (extension_settings[extensionName].autoApplyOnLoad && 
+            extension_settings[extensionName].lastAppliedSettings) {
+            await applyLastSettings();
+        }
+        
+        console.log('隐藏消息助手已初始化');
+    } catch (error) {
+        console.error('初始化隐藏消息助手时出错:', error);
+        toastr.error('初始化扩展时出错');
+    }
 });
+
+// 导出必要的函数和变量
+export {
+    hideChatMessageRange,
+    applyHideSettings,
+    messageIndexManager
+};
