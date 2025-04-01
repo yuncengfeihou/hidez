@@ -246,33 +246,13 @@ class HideHelperUI {
         eventSource.on(event_types.CHAT_CHANGED, () => this.loadChatState());
         eventSource.on(event_types.MESSAGE_RECEIVED, () => {
             if (this.currentSettings?.hideLastN > 0) {
-                this.applyHideSettings();
+                this.applySettings();
             }
         });
     }
 
-    async saveSettings() {
-        const context = getContext();
+    async applySettings() {
         const hideLastN = parseInt($('#hide-last-n').val()) || 0;
-        const target = context.groupId 
-            ? context.groups.find(x => x.id == context.groupId)
-            : context.characters[context.characterId];
-        
-        if (!target) return;
-
-        target.data = target.data || {};
-        target.data.hideHelperSettings = { hideLastN };
-        this.currentSettings = { hideLastN };
-        
-        await this.applyHideSettings();
-        
-        saveSettingsDebounced();
-        toastr.success('设置已保存并应用');
-        this.updateStats();
-    }
-
-    async applyHideSettings() {
-        const hideLastN = this.currentSettings?.hideLastN || 0;
         const { chat } = getContext();
         
         if (hideLastN <= 0 || hideLastN >= chat.length) {
@@ -303,6 +283,28 @@ class HideHelperUI {
         this.currentSettings = target?.data?.hideHelperSettings || { hideLastN: 0 };
         $('#hide-last-n').val(this.currentSettings.hideLastN);
         this.updateStats();
+    }
+
+    async saveSettings() {
+        const context = getContext();
+        const hideLastN = parseInt($('#hide-last-n').val()) || 0;
+        const target = context.groupId 
+            ? context.groups.find(x => x.id == context.groupId)
+            : context.characters[context.characterId];
+        
+        if (!target) return;
+
+        target.data = target.data || {};
+        target.data.hideHelperSettings = { hideLastN };
+        this.currentSettings = { hideLastN };
+        
+        // 先保存设置
+        saveSettingsDebounced();
+        
+        // 然后应用设置
+        await this.applySettings();
+        
+        toastr.success('设置已保存并应用');
     }
 }
 
