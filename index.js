@@ -5,6 +5,7 @@ import { hideChatMessageRange } from "../../../chats.js";
 
 const extensionName = "hide-helper";
 const defaultSettings = {
+    // 保留全局默认设置用于向后兼容
     hideLastN: 0,
     lastAppliedSettings: null
 };
@@ -17,7 +18,7 @@ function loadSettings() {
     }
 }
 
-// 创建 UI 面板
+// 创建UI面板
 function createUI() {
     const hideHelperPanel = document.createElement('div');
     hideHelperPanel.id = 'hide-helper-panel';
@@ -26,91 +27,116 @@ function createUI() {
         <div class="hide-helper-section">
             <label for="hide-last-n">隐藏楼层:</label>
             <input type="number" id="hide-last-n" min="0" placeholder="隐藏最后N层之前的消息">
-            <div id="current-hidden-setting">当前隐藏设置: 无</div>
-            <button class="save-settings-btn" id="hide-save-settings-btn">保存当前设置</button>
+            <div class="hide-helper-buttons">
+                <button id="hide-save-settings-btn">保存设置</button>
+            </div>
+        </div>
+        <div class="hide-helper-current">
+            <strong>当前隐藏设置:</strong> <span id="hide-current-value">无</span>
         </div>
     `;
     document.body.appendChild(hideHelperPanel);
 
     // 设置事件监听器
     setupEventListeners();
-
-    // 初始化时更新显示
-    updateHiddenSettingDisplay();
 }
 
-// 设置事件监听器
-function setupEventListeners() {
-    const hideLastNInput = document.getElementById('hide-last-n');
-    
-    // 初始化输入框的值
-    const initialHiddenFloor = getHiddenFloor();
-    hideLastNInput.value = initialHiddenFloor !== null ? initialHiddenFloor : '';
-    
-    // 输入框事件监听
-    hideLastNInput.addEventListener('input', (e) => {
-        const value = parseInt(e.target.value) || 0;
-        extension_settings[extensionName].hideLastN = value;
-        updateHiddenSetting();
-        saveSettingsDebounced();
-    });
-
-    // 保存按钮事件监听
-    document.getElementById('hide-save-settings-btn').addEventListener('click', saveCurrentSettings);
-
-    // 监听聊天切换事件，更新显示
-    eventSource.on(event_types.CHAT_CHANGED, updateHiddenSettingDisplay);
-}
-
-// 获取当前 character 或 group 的隐藏楼层数
-function getHiddenFloor() {
+// 获取当前角色/群组的隐藏设置
+function getCurrentHideSettings() {
     const context = getContext();
-    if (context.characterId !== undefined) {
-        return characters[context.characterId]?.data?.hidden_floor ?? null;
-    } else if (context.groupId) {
-        return groups.find(x => x.id == context.groupId)?.data?.hidden_floor ?? null;
+    const isGroup = !!context.groupId;
+    const target = isGroup 
+        ? context.groups.find(x => x.id == context.groupId)
+        : context.characters[context.characterId];
+    
+    if (!target) return null;
+    
+    // 检查是否有保存的设置
+    if (target.data?.hideHelperSettings) {
+        return target.data.hideHelperSettings;
     }
+    
+    // 没有则返回null
     return null;
 }
 
-// 更新当前 character 或 group 的隐藏设置
-function updateHiddenSetting() {
+// 保存当前角色/群组的隐藏设置
+function saveCurrentHideSettings(hideLastN) {
     const context = getContext();
-    const value = extension_settings[extensionName].hideLastN;
-    if (context.characterId !== undefined) {
-        if (!characters[context.characterId].data) {
-            characters[context.characterId].data = {};
-        }
-        characters[context.characterId].data.hidden_floor = value;
-        saveCharacterDebounced(); // 保存角色数据
-    } else if (context.groupId) {
-        const group = groups.find(x => x.id == context.groupId);
-        if (group) {
-            if (!group.data) {
-                group.data = {};
-            }
-            group.data.hidden_floor = value;
-            saveGroupChat(context.groupId); // 保存群组数据
-        }
-    }
-    updateHiddenSettingDisplay();
+    const isGroup = !!context.groupId;
+    const target = isGroup 
+        ? context.groups.find(x => x.id == context.groupId)
+        : context.characters[context.characterId];
+    
+    if (!target) return false;
+    
+    // 初始化data对象如果不存在
+    target.data = target.data || {};
+    target.data.hideHelperSettings = target.data.hideHelperSettings || {};
+    
+    // 保存设置
+    target.data.hideHelperSettings.hideLastN = hideLastN;
+    return true;
 }
 
-// 更新隐藏设置的显示
-function updateHiddenSettingDisplay() {
-    const hiddenFloor = getHiddenFloor();
-    const displayText = hiddenFloor !== null ? hiddenFloor : '无';
-    document.getElementById('current-hidden-setting').textContent = `当前隐藏设置: ${displayText}`;
+// 更新当前设置显示
+function updateCurrentHideSettingsDisplay() {
+    const currentSettings = getCurrentHideSettings();
+    const displayElement = document.getElementById('hide-current-value');
+    
+    if (!currentSettings || currentSettings.hideLastN === 0) {
+        displayElement.textContent = '无';
+    } else {
+        displayElement.textContent = currentSettings.hideLastN;
+    }
+}
+
+// 设置UI元素的事件监听器
+function setupEventListeners() {
+    const hideLastNInput = document.getElementById('hide-last-n');
+    
+    // 监听输入变化
+    hideLastNInput.addEventListener('input', (e) => {
+        const value = parseInt(e.target.value) || 0;
+        hideLastNInput.value = value >= 0 ? value : '';
+    });
+
+    // 保存设置按钮
+    document.getElementById('hide-save-settings-btn').addEventListener('click', () => {
+        const value = parseInt(hideLastNInput.value) || 0;
+        if (saveCurrentHideSettings(value)) {
+            applyHideSettings();
+            updateCurrentHideSettingsDisplay();
+            toastr.success('隐藏设置已保存');
+        } else {
+            toastr.error('无法保存设置');
+        }
+    });
+
+    // 监听聊天切换事件
+    eventSource.on(event_types.CHAT_CHANGED, () => {
+        const currentSettings = getCurrentHideSettings();
+        hideLastNInput.value = currentSettings?.hideLastN || '';
+        updateCurrentHideSettingsDisplay();
+    });
+
+    // 监听新消息事件
+    eventSource.on(event_types.MESSAGE_RECEIVED, () => {
+        const currentSettings = getCurrentHideSettings();
+        if (currentSettings?.hideLastN > 0) {
+            applyHideSettings();
+        }
+    });
 }
 
 // 应用隐藏设置
 async function applyHideSettings() {
     const context = getContext();
     const chatLength = context.chat?.length || 0;
+    const currentSettings = getCurrentHideSettings();
+    const hideLastN = currentSettings?.hideLastN || 0;
     
     if (chatLength === 0) return;
-    
-    const hideLastN = extension_settings[extensionName].hideLastN || 0;
     
     if (hideLastN > 0 && hideLastN < chatLength) {
         const visibleStart = chatLength - hideLastN;
@@ -118,37 +144,9 @@ async function applyHideSettings() {
         await hideChatMessageRange(0, chatLength - 1, true);
         // 然后隐藏指定范围
         await hideChatMessageRange(0, visibleStart - 1, false);
-        
-        extension_settings[extensionName].lastAppliedSettings = {
-            type: 'lastN',
-            value: hideLastN
-        };
-        saveSettingsDebounced();
     } else if (hideLastN === 0) {
         // 取消隐藏所有消息
         await hideChatMessageRange(0, chatLength - 1, true);
-        extension_settings[extensionName].lastAppliedSettings = null;
-        saveSettingsDebounced();
-    }
-}
-
-// 保存当前设置并应用
-function saveCurrentSettings() {
-    const hideLastN = extension_settings[extensionName].hideLastN || 0;
-    if (hideLastN >= 0) {
-        applyHideSettings();
-    }
-    toastr.success('隐藏设置已保存并应用');
-}
-
-// 应用上次的保存设置
-async function applyLastSettings() {
-    const lastSettings = extension_settings[extensionName].lastAppliedSettings;
-    
-    if (!lastSettings) return;
-    
-    if (lastSettings.type === 'lastN') {
-        await applyHideSettings();
     }
 }
 
@@ -157,8 +155,11 @@ jQuery(async () => {
     loadSettings();
     createUI();
     
-    // 如果有上次保存的设置，延迟应用
-    if (extension_settings[extensionName].lastAppliedSettings) {
-        setTimeout(applyLastSettings, 1000); // 延迟确保聊天加载完成
-    }
+    // 初始加载时更新显示
+    setTimeout(() => {
+        const currentSettings = getCurrentHideSettings();
+        const hideLastNInput = document.getElementById('hide-last-n');
+        hideLastNInput.value = currentSettings?.hideLastN || '';
+        updateCurrentHideSettingsDisplay();
+    }, 1000);
 });
