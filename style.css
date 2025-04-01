@@ -1,0 +1,75 @@
+#hide-helper-panel {
+    position: fixed;
+    right: 20px;
+    top: 200px;
+    width: 150px;
+    height: auto;
+    background-color: var(--background-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    padding: 10px;
+    z-index: 1000;
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.2);
+    color: var(--text-color);
+}
+
+#hide-helper-panel h4 {
+    margin-top: 0;
+    text-align: center;
+    padding-bottom: 5px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.hide-helper-section {
+    margin-bottom: 10px;
+}
+
+.hide-helper-section label {
+    display: block;
+    margin-bottom: 5px;
+}
+
+.hide-helper-section input[type="number"] {
+    width: 100%;
+    padding: 5px;
+    box-sizing: border-box;
+    background-color: var(--background-secondary);
+    color: var(--text-color);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+}
+
+.hide-helper-buttons {
+    display: flex;
+    justify-content: center;
+    margin-top: 5px;
+}
+
+.hide-helper-buttons button {
+    padding: 5px;
+    background-color: var(--background-secondary);
+    color: var(--text-color);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    cursor: pointer;
+    width: 100%;
+}
+
+.hide-helper-buttons button:hover {
+    background-color: var(--background-tertiary);
+}
+
+.save-settings-btn {
+    width: 100%;
+    padding: 5px;
+    margin-top: 10px;
+    background-color: var(--background-secondary);
+    color: var(--text-color);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+.save-settings-btn:hover {
+    background-color: var(--background-tertiary);
+}
