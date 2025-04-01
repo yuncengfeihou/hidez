@@ -1,0 +1,11 @@
+{
+    "display_name": "消息隐藏助手z.1",
+    "loading_order": 16,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "Assistant",
+    "version": "1.0.0",
+    "homePage": ""
+}
