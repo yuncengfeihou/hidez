@@ -219,7 +219,6 @@ class HideHelperUI {
                 <input type="number" id="hide-last-n" min="0" 
                        placeholder="输入要保留的消息数量">
                 <div class="hide-helper-buttons">
-                    <button id="hide-apply-btn">立即应用</button>
                     <button id="hide-save-btn">保存设置</button>
                 </div>
             </div>
@@ -238,7 +237,6 @@ class HideHelperUI {
     }
 
     setupEventListeners() {
-        $('#hide-apply-btn').on('click', () => this.applySettings());
         $('#hide-save-btn').on('click', () => this.saveSettings());
         $('#perf-mode').on('change', (e) => {
             extension_settings[extensionName].performanceMode = e.target.checked;
@@ -248,13 +246,33 @@ class HideHelperUI {
         eventSource.on(event_types.CHAT_CHANGED, () => this.loadChatState());
         eventSource.on(event_types.MESSAGE_RECEIVED, () => {
             if (this.currentSettings?.hideLastN > 0) {
-                this.applySettings();
+                this.applyHideSettings();
             }
         });
     }
 
-    async applySettings() {
+    async saveSettings() {
+        const context = getContext();
         const hideLastN = parseInt($('#hide-last-n').val()) || 0;
+        const target = context.groupId 
+            ? context.groups.find(x => x.id == context.groupId)
+            : context.characters[context.characterId];
+        
+        if (!target) return;
+
+        target.data = target.data || {};
+        target.data.hideHelperSettings = { hideLastN };
+        this.currentSettings = { hideLastN };
+        
+        await this.applyHideSettings();
+        
+        saveSettingsDebounced();
+        toastr.success('设置已保存并应用');
+        this.updateStats();
+    }
+
+    async applyHideSettings() {
+        const hideLastN = this.currentSettings?.hideLastN || 0;
         const { chat } = getContext();
         
         if (hideLastN <= 0 || hideLastN >= chat.length) {
@@ -284,24 +302,6 @@ class HideHelperUI {
         
         this.currentSettings = target?.data?.hideHelperSettings || { hideLastN: 0 };
         $('#hide-last-n').val(this.currentSettings.hideLastN);
-        this.updateStats();
-    }
-
-    saveSettings() {
-        const context = getContext();
-        const hideLastN = parseInt($('#hide-last-n').val()) || 0;
-        const target = context.groupId 
-            ? context.groups.find(x => x.id == context.groupId)
-            : context.characters[context.characterId];
-        
-        if (!target) return;
-
-        target.data = target.data || {};
-        target.data.hideHelperSettings = { hideLastN };
-        this.currentSettings = { hideLastN };
-        
-        saveSettingsDebounced();
-        toastr.success('设置已保存');
         this.updateStats();
     }
 }
